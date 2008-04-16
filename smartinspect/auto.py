@@ -12,12 +12,12 @@ change it before enabling:
 >>> si.enabled = True
 """
 
-import sys
+import os
 from smartinspect import SmartInspect
 
 __all__ = ('si', 'si_main',)
 
-si = SmartInspect(sys.argv[0])
+si = SmartInspect(os.path.basename(os.sys.argv[0]))
 si.connections = 'tcp()'
 si.enabled = False
 si_main = si.add_session('Main', True)

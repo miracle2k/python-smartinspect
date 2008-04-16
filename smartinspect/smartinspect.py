@@ -5,7 +5,10 @@ Port of SmartInspect.pas (from SmartInspect Professional v2.3.3.7025)
 NOTE: Many things in here have not yet been tested at all. This code is alpha
 quality in a very real sense. You have been warned.
 
-Compatibility Notes:
+Not all the features have been implemented yet. In particular, the file-based
+protocols are missing.
+
+Other Compatibility Notes:
 
     * Identifers have been changed to conform with the Python style guide. In
       some instances it made sense to slightly modify implementations, say
@@ -38,23 +41,22 @@ Compatibility Notes:
 """
 
 from __future__ import with_statement
-import sys
-import threading
+import os, sys
+import socket
+import struct
+import threading, thread
+import datetime, time
 import StringIO
-
-
-__all__ ('SmartInspect', 'Session',)
-
 
 
 ################################################################################
 ## Global constants.
 ################################################################################
 
-VERSION = '2.3.3.7025'
+VERSION = '0.01 for 2.3.3.7025'
 TCP_CLIENT_BANNER = 'SmartInspect Python Library v' + VERSION;
 
-DEFAULT_COLOR = False  # TODO
+DEFAULT_COLOR = (0x05, 0x00, 0x00, 0xff,)   # clWindow / COLOR_WINDOW
 MAGIC_LOG_STRING = 'SILF'
 DEFAULT_TEXT_PATTERN = '[%timestamp%] %level%: %title%'
 
@@ -77,10 +79,12 @@ PROTOCOL_CONNECTED_MSG = 'This protocol is currently connected. ' +\
 class SmartInspectError(Exception): pass
 
 class LoadConnectionsError(SmartInspectError):
-    filename = ""
+    def __init__(self, filename):
+        self.filename = filename
 
 class LoadConfigurationsError(SmartInspectError):
-    filename = ""
+    def __init__(self, filename):
+        self.filename = filename
 
 class ProtocolError(SmartInspectError):
     """Error raised in Protocol-related code.
@@ -88,7 +92,7 @@ class ProtocolError(SmartInspectError):
     References the ``Protocol`` instance directly, instead of storing it's name
     and options string, as in the Delphi implementation.
     """
-    def __init__(message, protocol, *args, **kwargs):
+    def __init__(self, message, protocol, *args, **kwargs):
         self.protocol = protocol
         super(ProtocolError, self).__init__(message, *args, **kwargs)
 
@@ -108,38 +112,11 @@ class PacketType:
     ProcessFlow = 6
 
 class LogEntryType:
-    """IDs as expected by SI console.
-    """
-    """'Separator',        { ltSeparator }
-    'EnterMethod',      { ltEnterMethod }
-    'LeaveMethod',      { ltLeaveMethod }
-    'ResetCallstack',   { ltResetCallstack }
-    'Message',          { ltMessage }
-    'Warning',          { ltWarning }
-    'Error',            { ltError }
-    'InternalError',    { ltInternalError }
-    'Comment',          { ltComment }
-    'VariableValue',    { ltVariableValue }
-    'Checkpoint',       { ltCheckpoint }
-    'Debug',            { ltDebug }
-    'Verbose',          { ltVerbose }
-    'Fatal',            { ltFatal }
-    'Conditional',      { ltConditional }
-    'Assert',           { ltAssert }
-    'Text',             { ltText }
-    'Binary',           { ltBinary }
-    'Graphic',          { ltGraphic }
-    'Source',           { ltSource }
-    'Object',           { ltObject }
-    'WebContent',       { ltWebContent }
-    'System',           { ltSystem }
-    'MemoryStatistic',  { ltMemoryStatistic }
-    'DatabaseResult',   { ltDatabaseResult }
-    'DatabaseStructure' { ltDatabaseStructure }"""
+    """IDs as expected by SI console."""
     Separator = 0
     EnterMethod = 1
     LeaveMethod = 2
-    ResetCallback = 3
+    ResetCallstack = 3
     Message = 100
     Warning = 101
     Error = 102
@@ -162,31 +139,36 @@ class LogEntryType:
     MemoryStatistic = 207
     DatabaseResult = 208
     DatabaseStructure = 209
+    idents = {
+        Separator: 'Separator',
+        EnterMethod: 'EnterMethod',
+        LeaveMethod: 'LeaveMethod',
+        ResetCallstack: 'ResetCallstack',
+        Message: 'Message',
+        Warning: 'Warning',
+        Error: 'Error',
+        InternalError: 'InternalError',
+        Comment: 'Comment',
+        VariableValue: 'VariableValue',
+        Checkpoint: 'Checkpoint',
+        Debug: 'Debug',
+        Verbose: 'Verbose',
+        Fatal: 'Fatal',
+        Conditional: 'Conditional',
+        Assert: 'Assert',
+        Text: 'Text',
+        Binary: 'Binary',
+        Graphic: 'Graphic',
+        Source: 'Source',
+        Object: 'Object',
+        WebContent: 'WebContent',
+        System: 'System',
+        MemoryStatistic: 'MemoryStatistic',
+        DatabaseResult: 'DatabaseResult',
+    }
 
 class ViewerId:
     """IDs as expected by SI console."""
-    """
-    'None',              { viNone }
-    'Title',             { viTitle }
-    'Data',              { viData }
-    'List',              { viList }
-    'ValueList',         { viValueList }
-    'Inspector',         { viInspector }
-    'Table',             { viTable }
-    'Web',               { viWeb }
-    'Binary',            { viBinary }
-    'HtmlSource',        { viHtmlSource }
-    'JavaScriptSource',  { viJavaScriptSource }
-    'VbScriptSource',    { viVbScriptSource }
-    'PerlSource',        { viPerlSource }
-    'SqlSource',         { viSqlSource }
-    'IniSource',         { viIniSource }
-    'PythonSource',      { viPythonSource }
-    'XmlSource',         { viXmlSource }
-    'Bitmap',            { viBitmap }
-    'Jpeg',              { viJpeg }
-    'Icon',              { viIcon }
-    'Metafile'           { viMetafile } """
     None_ = -1
     Title = 0
     Data = 1
@@ -208,6 +190,29 @@ class ViewerId:
     Jpeg = 401
     Icon = 402
     Metafile = 403
+    idents = {
+        None_: 'None',
+        Title: 'Title',
+        Data: 'Data',
+        List: 'List',
+        ValueList: 'ValueList',
+        Inspector: 'Inspector',
+        Table: 'Table',
+        Web: 'Web',
+        Binary: 'Binary',
+        HtmlSource: 'HtmlSource',
+        JavaScriptSource: 'JavaScriptSource',
+        VbScriptSource: 'VbScriptSource',
+        PerlSource: 'PerlSource',
+        SqlSource: 'SqlSource',
+        IniSource: 'IniSource',
+        PythonSource: 'PythonSource',
+        XmlSource: 'XmlSource',
+        Bitmap: 'Bitmap',
+        Jpeg: 'Jpeg',
+        Icon: 'Icon',
+        Metafile: 'Metafile',
+    }
 
 class SourceId:
     Html = 1
@@ -220,64 +225,67 @@ class SourceId:
     Xml = 8
 
 class GraphicId:
-    Bitmap = 1
-    Jpeg = 2
-    Icon = 3
-    Metafile = 4
+    Bitmap = 0
+    Jpeg = 1
+    Icon = 2
+    Metafile = 3
 
 class ControlCommandType:
-    ClearLog = 1
-    ClearWatches = 2
-    ClearAutoViews = 3
-    ClearAll = 4
-    ClearProcessFlow = 5
+    ClearLog = 0
+    ClearWatches = 1
+    ClearAutoViews = 2
+    ClearAll = 3
+    ClearProcessFlow = 4
 
 class WatchType:
-    Char = 1
-    String = 2
-    Integer = 3
-    Float = 4
-    Boolean = 5
-    Address = 6
-    Timestamp = 7
-    Object = 8
+    Char = 0
+    String = 1
+    Integer = 2
+    Float = 3
+    Boolean = 4
+    Address = 5
+    Timestamp = 6
+    Object = 7
 
 class ProcessFlowType:
-    EnterMethod = 1
-    LeaveMethod = 2
-    EnterThread = 3
-    LeaveThread = 4
-    EnterProcess = 5
-    LeaveProcess = 6
+    EnterMethod = 0
+    LeaveMethod = 1
+    EnterThread = 2
+    LeaveThread = 3
+    EnterProcess = 4
+    LeaveProcess = 5
 
 class Level:
-    """'Debug',     { lvDebug }
-    'Verbose',   { lvVerbose }
-    'Message',   { lvMessage }
-    'Warning',   { lvWarning }
-    'Error',     { lvError }
-    'Fatal',     { lvFatal }
-    'Unknown'    { lvControl, sic! }"""
-    Debug = 1
-    Verbose = 2
-    Message = 3
-    Warning = 4
-    Error = 5
-    Fatal = 6
-    Control = 7
+    Debug = 0
+    Verbose = 1
+    Message = 2
+    Warning = 3
+    Error = 4
+    Fatal = 5
+    Control = 6
+    idents = {
+        Debug: 'Debug',
+        Verbose: 'Verbose',
+        Message: 'Message',
+        Warning: 'Warning',
+        Error: 'Error',
+        Fatal: 'Fatal',
+        Control: 'Unknown',   # sic!
+    }
 
 class FileRotate:
-    """'None',      { frNone }
-    'Hourly',    { frHourly }
-    'Daily',     { frDaily }
-    'Weekly',    { frWeekly }
-    'Monthly'    { frMonthly }"""
-    None_ = 1
-    Hourly = 2
-    Daily = 3
-    Weekly = 4
-    Monthly = 5
-
+    None_ = 0
+    Hourly = 1
+    Daily = 2
+    Weekly = 3
+    Monthly = 4
+    idents = {
+        None_: 'None',
+        Hourly: 'Hourly',
+        Daily: 'Daily',
+        Weekly: 'Weekly',
+        Monthly: 'Monthly',
+    }
 
 
 ################################################################################
@@ -306,10 +314,13 @@ class Packet(object):
     """Base class for all packets."""
     def __init__(self):
         self.level = Level.Message
+
     def get_size(self):
         raise NotImplementedError()
+
     def get_packet_type(self):
         raise NotImplementedError()
+    packet_type = property(lambda s: s.get_packet_type())
 
 class PacketQueue(object):
     def __init__(self, size=None):
@@ -318,16 +329,18 @@ class PacketQueue(object):
     def _set_size(self, value):
         self._size = value
         self._resize()
-    size = property(lambda s: self._size, _set_size)
-    def _resize():
-        while len(self._data) > self.size: self.pop()
+    size = property(lambda s: s._size, _set_size)
+    def _resize(self):
+        while self.size and len(self._data) > self.size:
+            self.pop()
     def clear(self):
         while self._data: self.pop()
     def push(self, packet):
         self._data.append(packet)
         self._resize()
-    def pop():
-        return self._data.pop(0)
+    def pop(self):
+        if len(self._data): return self._data.pop(0)
+        else: return None
 
 class LogEntry(Packet):
     def __init__(self, log_entry_type, viewer_id):
@@ -336,9 +349,8 @@ class LogEntry(Packet):
         self.log_entry_type = log_entry_type
         self.viewer_id = viewer_id
         self.color = DEFAULT_COLOR
-        # TODO
-        self.thread_id = 0; # GetCurrentThreadId;
-        self.process_id = 0; #GetCurrentProcessId;
+        self.thread_id = thread.get_ident()
+        self.process_id = os.getpid()
 
     def get_size(self):
 ##            Result :=
@@ -357,6 +369,7 @@ class LogEntry(Packet):
     def get_packet_type(self):
         return PacketType.LogEntry
 
+    # TODO: duplicated in ControlCommand - move to common base?
     def _get_data(self):
         return self._data
     def _set_data(self, value):
@@ -368,13 +381,14 @@ class LogEntry(Packet):
 
     @property
     def has_data(self):
-        return self._data and self._data.size > 0
+        return self._data and self._data.len > 0
 
 class ControlCommand(Packet):
     def __init__(self, control_command_type):
         super(ControlCommand, self).__init__()
+        self._data = StringIO.StringIO()
         self.control_command_type = control_command_type
-        self.level = PacketLevel.Control
+        self.level = Level.Control
 
     def get_size():
 ##        Result := SizeOf(TSiControlCommandHeader)
@@ -393,24 +407,27 @@ class ControlCommand(Packet):
         if value:
             self._data = copy(value)
         else:
-            self._data.clear()
+            self._data.truncate(size=0)
     data = property(_get_data, _set_data)
 
     @property
     def has_data(self):
-        return self._data and self._data.size > 0
+        return self._data and self._data.len > 0
 
 class Watch(Packet):
     def __init__(self, watch_type):
         super(Watch, self).__init__()
         self.watch_type = watch_type
 
+    def get_packet_type(self):
+        return PacketType.Watch
+
 class ProcessFlow(Packet):
     def __init__(self, process_flow_type):
         super(ProcessFlow, self).__init__()
         self.process_flow_type = process_flow_type
-        self.thread_id = GetCurrentThreadId
-        self.process_id = GetCurrentProcessId
+        self.thread_id = thread.get_ident()
+        self.process_id = os.getpid()
 
     def get_size():
 ##        Result :=
@@ -420,8 +437,7 @@ class ProcessFlow(Packet):
         pass
 
     def get_packet_type(self):
-        return PacketType.Watch
-
+        return PacketType.ProcessFlow
 
 
 ################################################################################
@@ -435,31 +451,62 @@ class Formatter(object):
         self.write(stream)
 
 class BinaryFormatter(Formatter):
+    """Stores log data in a fast binary format."""
+
     max_capacity = 10 * 1024 * 1024
 
     def __init__(self):
         self._stream = StringIO.StringIO()
         self._size = 0
 
-    def write(self, stream):
-        if self._size > 0:
-##            LHeader.PacketSize := FSize;
-##            LHeader.PacketType := CSiPacketTypeLookup[FPacket.PacketType];
-##            AStream.Write(LHeader, SizeOf(LHeader));
-##            FStream.Position := 0;
-##            AStream.CopyFrom(FStream, FSize);
-            pass
-
     def _reset_stream(self):
         if self._size > BinaryFormatter.max_capacity:
             # Reset the stream capacity if the previous packet
             # was very big. This ensures that the amount of memory
             # can shrink again after a big packet has been sent.
-            self._stream.clear()
+            self._stream.truncate(0)
         else:
-            # Only reset the position. This ensures a very good
+            # Only reset the position. This should ensure better
             # performance since no reallocations are necessary.
-            self._stream.position = 0
+            self._stream.pos = 0
+
+    def _write_string(self, s):
+        if isinstance(s, unicode):
+            s = s.encode('utf-8')
+        self._stream.write(s)
+    def _write_long(self, i):
+        # store as Delphi Integer (32bit signed, little endian)
+        self._stream.write(struct.pack('l', i))
+    def _write_ulong(self, i):
+        # store as Delphi Cardinal (32bit unsigned, little endian)
+        self._stream.write(struct.pack('l', i))
+    def _write_word(self, i):
+        # store as Delphi Word (16bit unsigned, little endian)
+        self._stream.write(struct.pack('H', i))
+    def _write_datetime(self, d):
+        # Delphi TDatetime is 8-byte double:
+        # TDateTime := UnixTimestamp / SecsPerDay * UnixTimestamp(01/10/1070)
+        tdatetime = time.mktime(d.timetuple()) / 86400 + 25569.0
+        self._stream.write(struct.pack('d', tdatetime))
+    def _write_color(self, c):
+        # c is a 4-tuple; see module doc section on colors for more info
+        self._write_string("".join(map(lambda n: struct.pack('B', n), c)))
+
+    def write(self, stream):
+        """Writes a previously compiled packet to the supplied stream."""
+        if self._size > 0:
+            # hack: store target stream locally so we can use _write_* methods
+            __self_stream = self._stream
+            self._stream = stream
+            # write packet header to output
+            self._write_word(self._packet.packet_type)
+            self._write_long(self._size)
+            # copy local, compiled data to output stream as packet body
+            __self_stream.pos = 0
+            # read max size as stream might not have been reset!
+            stream.write(__self_stream.read(self._size))
+            # switch streams back
+            self._stream = __self_stream
 
     def compile(self, packet):
         self._reset_stream()
@@ -474,119 +521,79 @@ class BinaryFormatter(Formatter):
         elif packet.packet_type == PacketType.ProcessFlow:
             self._compile_process_flow()
 
-        size = self.stream.position
-        return size + len(SiPacketHeader)
+        self._size = self._stream.pos
+        return self._size + 6    # packet header size: 6 bytes
 
     def _compile_control_command(self):
-        pass
-##        var
-##          LHeader: TSiControlCommandHeader;
-##          LControlCommand: TSiControlCommand;
-##        begin
-##          LControlCommand := TSiControlCommand(FPacket);
-##          LHeader.ControlCommandType := Ord(LControlCommand.ControlCommandType);
-##
-##          if LControlCommand.HasData then
-##            LHeader.DataLength := LControlCommand.Data.Size
-##          else
-##            LHeader.DataLength := 0;
-##
-##          FStream.Write(LHeader, SizeOf(LHeader));
-##
-##          if LControlCommand.HasData then
-##          begin
-##            FStream.CopyFrom(LControlCommand.Data, 0);
-##            LControlCommand.Data.Position := 0;
-##          end;
+        control_command = self._packet
+        stream = self._stream
+
+        # header
+        self._write_long(control_command.control_command_type)
+        if control_command.has_data: self._write_long(control_command.data.len)
+        else: self._write_long(0)
+
+        # values
+        if control_command.has_data:
+            stream.write(control_command.data.read())
+            control_command.data.pos = 0
 
     def _compile_log_entry(self):
-        pass
-##        var
-##          LLogEntry: TSiLogEntry;
-##          LHeader: TSiLogEntryHeader;
-##          LTitle: UTF8String;
-##          LHostName: UTF8String;
-##          LSessionName: UTF8String;
-##          LAppName: UTF8String;
-##        begin
-##          LLogEntry := TSiLogEntry(FPacket);
-##          LTitle := UTF8Encode(LLogEntry.Title);
-##          LHostName := UTF8Encode(LLogEntry.HostName);
-##          LSessionName := UTF8Encode(LLogEntry.SessionName);
-##          LAppName := UTF8Encode(LLogEntry.AppName);
-##
-##          LHeader.LogEntryType := CSiLogEntryTypeLookup[LLogEntry.LogEntryType];
-##          LHeader.ViewerId := CSiViewerIdLookup[LLogEntry.ViewerId];
-##          LHeader.AppNameLength := Length(LAppName);
-##          LHeader.SessionNameLength := Length(LSessionName);
-##          LHeader.TitleLength := Length(LTitle);
-##          LHeader.HostNameLength := Length(LHostName);
-##
-##          if LLogEntry.HasData then
-##            LHeader.DataLength := LLogEntry.Data.Size
-##          else
-##            LHeader.DataLength := 0;
-##
-##          LHeader.ThreadId := LLogEntry.ThreadId;
-##          LHeader.ProcessId := LLogEntry.ProcessId;
-##          LHeader.TimeStamp := LLogEntry.Timestamp;
-##          LHeader.Color := LLogEntry.Color;
-##
-##          FStream.Write(LHeader, SizeOf(LHeader));
-##          WriteString(LAppName, FStream);
-##          WriteString(LSessionName, FStream);
-##          WriteString(LTitle, FStream);
-##          WriteString(LHostName, FStream);
-##
-##          if LLogEntry.HasData then
-##          begin
-##            FStream.CopyFrom(LLogEntry.Data, 0);
-##            LLogEntry.Data.Position := 0;
-##          end;
+        log_entry = self._packet
+        stream = self._stream
+
+        # header
+        self._write_long(log_entry.log_entry_type)
+        self._write_long(log_entry.viewer_id)
+        self._write_long(len(log_entry.appname))
+        self._write_long(len(log_entry.session_name))
+        self._write_long(len(log_entry.title))
+        self._write_long(len(log_entry.hostname))
+        if log_entry.has_data: self._write_long(log_entry.data.len)
+        else: self._write_long(0)
+        self._write_ulong(log_entry.thread_id)
+        self._write_ulong(log_entry.process_id)
+        self._write_datetime(log_entry.timestamp)
+        self._write_color(log_entry.color)
+
+        # values
+        self._write_string(log_entry.appname)
+        self._write_string(log_entry.session_name)
+        self._write_string(log_entry.title)
+        self._write_string(log_entry.hostname)
+        if log_entry.has_data:
+            stream.write(log_entry.data.read())
+            log_entry.data.pos = 0
 
     def _compile_process_flow(self):
-        pass
-##        var
-##          LProcessFlow: TSiProcessFlow;
-##          LHeader: TSiProcessFlowHeader;
-##          LTitle: UTF8String;
-##          LHostName: UTF8String;
-##        begin
-##          LProcessFlow := TSiProcessFlow(FPacket);
-##          LTitle := UTF8Encode(LProcessFlow.Title);
-##          LHostName := UTF8Encode(LProcessFlow.HostName);
-##
-##          LHeader.ProcessFlowType := Ord(LProcessFlow.ProcessFlowType);
-##          LHeader.TitleLength := Length(LTitle);
-##          LHeader.HostNameLength := Length(LHostName);
-##          LHeader.ThreadId := LProcessFlow.ThreadId;
-##          LHeader.ProcessId := LProcessFlow.ProcessId;
-##          LHeader.Timestamp := LProcessFlow.Timestamp;
-##
-##          FStream.Write(LHeader, SizeOf(LHeader));
-##          WriteString(LTitle, FStream);
-##          WriteString(LHostName, FStream);
+        process_flow = self._packet
+        stream = self._stream
+
+        # header
+        self._write_long(process_flow.process_flow_type)
+        self._write_long(len(process_flow.title))
+        self._write_long(len(process_flow.hostname))
+        self._write_ulong(process_flow.process_id)
+        self._write_ulong(process_flow.thread_id)
+        self._write_datetime(process_flow.timestamp)
+
+        # values
+        self._write_string(process_flow.title)
+        self._write_string(process_flow.hostname)
 
     def _compile_watch(self):
-        pass
-##        var
-##          LWatch: TSiWatch;
-##          LHeader: TSiWatchHeader;
-##          LName: UTF8String;
-##          LValue: UTF8String;
-##        begin
-##          LWatch := TSiWatch(FPacket);
-##          LName := UTF8Encode(LWatch.Name);
-##          LValue := UTF8Encode(LWatch.Value);
-##
-##          LHeader.NameLength := Length(LName);
-##          LHeader.ValueLength := Length(LValue);
-##          LHeader.WatchType := Ord(LWatch.WatchType);
-##          LHeader.Timestamp := LWatch.Timestamp;
-##
-##          FStream.Write(LHeader, SizeOf(LHeader));
-##          WriteString(LName, FStream);
-##          WriteString(LValue, FStream);
+        watch = self._packet
+        stream = self._stream
+
+        # header
+        self._write_long(len(watch.name))
+        self._write_long(len(watch.value))
+        self._write_long(watch.watch_type)
+        self._write_datetime(watch.timestamp)
+
+        # values
+        self._write_string(watch.name)
+        self._write_string(watch.value)
 
 class TextFormatter(Formatter):
     def __init__(self):
@@ -612,14 +619,6 @@ class TextFormatter(Formatter):
     def pattern(self):
         return self._parser.indent
 
-# TODO
-# class FileRotater(object): pass
-
-# TODO
-#class FileStorage(object):
-#    """Responsible for tracking and deleting old backup files."""
-#    pass
-
 class ProtocolCommand(object):
     def __init__(self, action, state):
         self.action = action
@@ -632,32 +631,77 @@ class ProtocolOptions(object):
     classes in the Delphi implementation.
     """
 
-    def __init__(self, protocol):
+    def __init__(self, onchange=None):
         self._options = {}
-        self.protocol = protocol
+        self.onchange = onchange
 
-    def __setattr__(self, key, value):
-        with self._protocol._lock:
-            if self._protocol.connected:
-                raise SmartInspectError(SiProtocolConnectedError)
+    def __get__(self, instance, owner):
+        # Options property is read, return an options instance linking the
+        # the protocol this was accessed by (``instance``). Note that the
+        # options dict is passed by reference (which is what we want)!
+        return ProtocolOptions._OptionsImpl(self._options, instance, self.onchange)
 
-            _validate_option(key)
-            self._options[key] = value
+    def __set__(self, instance, value):
+        # Something is assigned to the options property.
+        if isinstance(value, dict):
+            pass
+        elif value is None:
+            value = {}
+        elif isinstance(value, ProtocolOptions):
+            value = value._options
+        else:
+            raise SmartInspectError(
+                    'Can''t assign a "%s" to protocol options.' % type(value))
 
-    def __getattr__(self, key):
-        with self._protocol._lock:
-            _validate_option(key)
-            return self_options.get(key, None)
+        # update our own values
+        for k, v in value.items():
+            setattr(self, k, v)
 
-    def _validate_option(self, option):
-        if not option in self.protocol.valid_options.keys():
-            raise SmartInspectError(u'Option "%s" not available for '+
-                u'protocol "%s"' % [option, self.protocol.name]);
+    class _OptionsImpl(object):
+        # The actual options "attribute access" implementation. The outer
+        # descriptor creates an instance of this with a link to the correct
+        # ``Protocol`` on "get".
 
-    def reset(self):
-        """Reset to default values"""
-        for option, default_value in self.protocol.valid_options.items():
-            setattr(self, option, default_value)
+        def __init__(self, options, protocol, onchange):
+            self._options = options
+            self._onchange = onchange
+            self.__dict__['_protocol'] = protocol # __setattr__ already requires this
+
+        def _validate_option(self, option):
+            if not option in self._protocol.valid_options.keys():
+                raise SmartInspectError(u'Option "%s" not available for protocol "%s"' % \
+                            (option, self._protocol.name,));
+
+        def __setattr__(self, key, value):
+            if key.startswith('_'):
+                return object.__setattr__(self, key, value)
+            else:
+                with self._protocol._lock:
+                    if self._protocol.connected:
+                        raise SmartInspectError(PROTOCOL_CONNECTED_MSG)
+
+                    self._validate_option(key)
+                    if value != self._options.get(key, None):
+                        self._options[key] = value
+                        # note this is only called on an actual change
+                        if self._onchange:
+                            self._onchange(self._protocol)
+
+        def __getattr__(self, key):
+            if key.startswith('_'):
+                return object.__getattr__(self, key)
+            else:
+                with self._protocol._lock:
+                    self._validate_option(key)
+                    return self._options.get(key, self._protocol.valid_options[key])
+
+        def reset(self):
+            """Reset to default values."""
+            # clearing the dict works, we are just storing the changed values
+            self._options = {}
+            if self._onchange:
+                self._onchange(self._protocol)
+
 
 class Protocol(object):
     """A protocol is responsible for the transport of packets."""
@@ -665,24 +709,23 @@ class Protocol(object):
     valid_options = {'level': Level.Debug,
                      'backlog': 0,
                      'flushon': Level.Error,
-                     'reconnect':False,
+                     'reconnect': False,
                      'keepopen': True, \
-                     'caption': None} # TODO: default this to Protocol.name
+                     'caption': None}
+
+    def _options_changed(self):
+        # default ``caption`` option to protocol name
+        if (self.options.caption is None) and (type(self).name is not None):
+            self.options.caption = type(self).name
+        if self.options.backlog <= 0:
+            self.options.keepopen = True
+    options = ProtocolOptions(_options_changed)
 
     def __init__(self):
         self._lock = threading.RLock()
+        self._queue = PacketQueue()
         self.connected = False
-        self.options = ProtocolOptions(self)
-        """
-          # TODO: options callback??
-          if FBacklog > 0 then
-            FKeepOpen := GetBooleanOption('keepopen', SiProtocolKeepOpen)
-          else
-            FKeepOpen := True;
-          FQueue.Backlog := FBacklog;
-          """
-        #self.queue := TSiPacketQueue.Create;
-        #self.queue.OnDelete := DeletePacket;
+        self.options.reset()        # will cause a validation
 
     def _internal_reconnect(self):
         self._internal_connect()
@@ -693,12 +736,13 @@ class Protocol(object):
 
     def connect(self):
         with self._lock:
-            if not self.connected and self.options.keep_open:
+            if not self.connected and self.options.keepopen:
                 try:
                     self._internal_connect()
-                    connected = True
+                    self.connected = True
                 except Exception, e:
                     self.reset()
+                    raise e
 
     def reconnect(self):
         try:
@@ -718,7 +762,7 @@ class Protocol(object):
 
     def reset(self):
         self._queue.clear()
-        self._conncted = False
+        self._connected = False
         self._internal_disconnect()
 
     def dispatch(self, command):
@@ -729,11 +773,9 @@ class Protocol(object):
                 except Exception, e:
                     raise ProtocolError(str(e), self)
 
-
-
     def forward_packet(self, packet, disconnect):
         if not self.connected:
-            if not self.options.keep_open:
+            if not self.options.keepopen:
                 self._internal_connect()
                 connected = True
             else:
@@ -751,26 +793,26 @@ class Protocol(object):
                 return
 
             if self.connected or self.options.reconnect or \
-                    not self.options.keep_open:
+                    not self.options.keepopen:
                 try:
                     skip = False
 
                     if self.options.backlog > 0:
-                        if packet.level >= self.options.flush_on and \
+                        if packet.level >= self.options.flushon and \
                             packet.level <> PacketLevel.Control:
-                                p = self.queue.pop()
+                                p = self._queue.pop()
                                 while p:
                                     try:
                                         self.forward_packet(p, False)
                                     finally:
                                         p.release()
-                                    p = self.queue.pop()
+                                    p = self._queue.pop()
                         else:
-                            self.queue.push(packet)
+                            self._queue.push(packet)
                             skip = True
 
                     if not skip:
-                        self.forward_packet(packet, not self.options.keep_open)
+                        self.forward_packet(packet, not self.options.keepopen)
                 except Exception, e:
                     self.reset()
                     raise ProtocolError(str(e), self)
@@ -778,17 +820,16 @@ class Protocol(object):
 class MemoryProtocol(Protocol):
     name = "mem"
 
-    valid_options = {
+    valid_options = Protocol.valid_options
+    valid_options.update({
         'astext': False,
         'maxsize': 2048,
         'pattern': DEFAULT_TEXT_PATTERN,
-        'indent': False}
+        'indent': False})
 
-    def __init__(self):
-        super(MemoryProtocol, self).__init__(self)
-
-    def _initialize_formatter(self):
-        # TODO: call this on option change?
+    def _options_changed(self):
+        super(MemoryProtocol, self).validate_options()
+        # use a formatter fitting for the selection setting
         if self.options.astext:
             self.formatter = TextFormatter()
             self.formatter.pattern = self.options.pattern
@@ -807,64 +848,62 @@ class MemoryProtocol(Protocol):
         if not command:
             return
 
-        if command is Stream:
+        if hasattr(command.state, 'write'):
             s = command.state
 
             if self.options.astext:
                 s.write('\xef\xbb\xbf')  # bom header
             else:
-                s.write(SiMagicLogString)
+                s.write(MAGIC_LOG_STRING)
 
             packet = self.queue.pop()
             while packet:
                 self.formatter.format(packet, s)
-                packet = queue.pop()
+                packet = self.queue.pop()
 
     def _internal_write_packet(self, packet):
         self.queue.push(packet)
 
-# TODO
-#class FileProtocol(Protocol):
-#    pass
-
-# TODO
-#class TextProtocol(Protocol):
-#    pass
 
 class TcpProtocol(Protocol):
     name = "tcp"
 
-    valid_options = {'host': '127.0.0.1',
-                     'port': 4228,
-                     'timeout': 30000}
+    valid_options = Protocol.valid_options
+    valid_options.update({'host': '127.0.0.1',
+                          'port': 4228,
+                          'timeout': 30000})
 
     def __init__(self):
+        super(TcpProtocol, self).__init__()
         self.formatter = BinaryFormatter()
 
     def _internal_connect(self):
-        self.client = TcpClient(self.options.host, self.options.port)
-        self.client.connect(self.options.timeout)
-        #FStream := TSiTcpClientStream.Create(FTcpClient);
-        #FStream.ReadLn;
-        #FStream.WriteLn(SiTcpClientBanner);
-        #FBuffer := TSiBufferedStream.Create(FStream, $2000);
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.settimeout(self.options.timeout/1000.0)
+        self._socket.connect((self.options.host, self.options.port,))
+        self._buffer = self._socket.makefile('rw', bufsize=0x2000)
 
-    def _internal_write_packet(packet):
-##        FFormatter.Format(APacket, FBuffer);
-##        FBuffer.Flush;
-##
-##        // Read (and wait for) the server answer.
-##        if FBuffer.Read(LAnswer, SizeOf(LAnswer)) <> SizeOf(LAnswer) then
-##        begin
-##        // We couldn't read the entire answer from the server, but the
-##        // Read method didn't raise an exception. This means that the
-##        // socket connection has been normally closed by the server,
-##        // but this shouldn't occur while trying to read the answer!
-##        raise ESmartInspectError.Create(SiSocketClosedError);
-        pass
+        # exchange banners
+        self._buffer.readline()
+        self._buffer.write("%s\n"%TCP_CLIENT_BANNER)
+
+    def _internal_write_packet(self, packet):
+        # let the formatter write directly to the tcp stream
+        self.formatter.format(packet, self._buffer)
+        self._buffer.flush()
+
+        # read (and wait for) the server answer
+        x = self._buffer.read(2)
+        if len(x) <> 2:
+        #if len(self._buffer.read(2)) <> 2:
+            # We couldn't read the entire answer from the server, but the
+            #  Read method didn't raise an exception. This means that the
+            # socket connection has been normally closed by the server,
+            # but this shouldn't occur while trying to read the answer!
+            raise ESmartInspectError.Create(SOCKET_CLOSED_MSG);
 
     def _internal_disconnect(self):
-        del self.client
+        self._socket.close()
 
 class Protocols(object):
     """Globally manage a list of available protocols.
@@ -873,8 +912,14 @@ class Protocols(object):
 
     Replaces the ProtocolFactory class of the Delphi implementation.
     """
-    _table = {}
-    _lock = threading.Lock()
+    _table = {
+        'mem': MemoryProtocol,
+        'tcp': TcpProtocol
+        # Not yet supported
+        # ('file', FileProtocol)
+        # ('text', TextProtocol)
+    }
+    _lock = threading.RLock()
 
     @classmethod
     def get(cls, name, options):
@@ -892,19 +937,47 @@ class Protocols(object):
                 cls._table[name] = klass
 
 
-
 ################################################################################
 ## Public interface clasess
 ################################################################################
 
 def default_level_to_parent(func):
+    """Decorator used by log methods that have an optional ``level`` argument
+    which should fallback to the instance's default if missing. For use within
+    ``Session``.
+
+    It's rather complex considering it only saves us one line within each
+    method it's applied to (the line would like like this:
+    ``if not level: level = self._parent.level``).
+
+    Note: Currently this requires ``level`` to be passed as a keyword argument.
+    Using introspection we could make it work for positional arguments as well.
+
+    Instead of using this we could attempt to fallback to the default log level
+    at a later moment before sending, in a common method, but this is difficult
+    for a number of reasons:
+        * Some methods need to validate that a certain level is below the
+          treshold (see also ``if_is_on``), while other's don't - but all of
+          them want to use the default level (e.g. see ``reset_callback``).
+        * In addition, for thread-safety reasons the ``is_on()`` check should
+          use the same level than the packet will then actually use, which
+          means the level to use (and therefore whether to use the default) has
+          to be determined before that.
+        * Sometimes we have to send multiple packets (e.g. ``enter_method``)
+    """
     def wrapper(self, *args, **kwargs):
+        if kwargs.get('level', None) is None:
+            kwargs['level'] = self.parent.level
         return func(self, *args, **kwargs)
     return wrapper
 
 def if_is_on(func):
+    """Only runs the decorated method after passing the ``level`` keyword
+    argument successfully through ``is_on``. For use within ``Session``.
+    """
     def wrapper(self, *args, **kwargs):
-        return func(self, *args, **kwargs)
+        if self.is_on(kwargs.get('level')):
+            return func(self, *args, **kwargs)
     return wrapper
 
 class Session(object):
@@ -927,11 +1000,9 @@ class Session(object):
                     self.parent.uddate_esssion(self, value, self.name)
                 self.name = value
 
-    def is_on(level=None):
+    def is_on(self, level=None):
         return self.active and self.parent.enabled and (
                     level >= self.parent.level or not level)
-
-
 
 
     def send_log_entry(self, level, title, log_entry_type, viewer_id,
@@ -945,22 +1016,22 @@ class Session(object):
         entry.data = data
         self.parent.send_log_entry(entry)
 
-    def send_process_fow(self, level, title, process_flow_type):
+    def send_process_flow(self, level, title, process_flow_type):
         process_flow = ProcessFlow(process_flow_type)
         process_flow.timestamp = self.parent.now()
         process_flow.level = level
         process_flow.title = title
-        self.parent.send_process_flow(self.process_flow)
+        self.parent.send_process_flow(process_flow)
 
     def send_watch(self, level, name, value, watch_type):
         watch = Watch(watch_type)
         watch.timestamp = self.parent.now()
         watch.level = level
-        watch.title = title
+        watch.name = name
         watch.value = value
-        self.parent.send_watch(self.process_flow)
+        self.parent.send_watch(watch)
 
-    def send_control_command(self, control_command_type, data):
+    def send_control_command(self, control_command_type, data=None):
         control_command = ControlCommand(control_command_type)
         control_command.level = Level.Control
         control_command.data = data
@@ -970,14 +1041,14 @@ class Session(object):
         # TODO: just send_log_entry with a viewer instance as the data part
         raise NotImplementedError()
 
-
-
-    @default_level_to_parent
-    @if_is_on
     def log_value(self, name, value, level=None, *args, **kwargs):
-        title = "%s = %s" % (name, value)
-        # of some values require custom formatting in the future, do this here
-        self.log(level, title,
+        # Depending on the datatype we may choose a different output format
+        if isinstance(value, basestring):
+            title = "%s = '%s'" % (name, value)
+        else:
+            title = "%s = %s" % (name, value)
+
+        self.log(title, level=level,
                  entry_type=LogEntryType.VariableValue,
                  *args, **kwargs)
 
@@ -1012,67 +1083,69 @@ class Session(object):
                 self.send_log_entry(LogLevel.Error, title, LogEntryType.Assert,
                                     ViewerId.Title)
 
-    def log_internal_error(self, title):
-        if self.is_on(LogLevel.Error):
-            self.send_log_entry(LogLevel.Error, title,
-                                LogEntryType.InternalError, ViewerId.Title)
-
-
-
-
     @default_level_to_parent
     def reset_callstack(self, level=None):
         self.send_log_entry(level, '', LogEntryType.ResetCallstack)
 
     @default_level_to_parent
+    @if_is_on
     def enter_method(self, name, level=None, instance=None):
-        if self.is_on(level):
-            if instance:
-                name = "%s.%s" %(type(instance).__name__, name)
+        if instance:
+            name = "%s.%s" %(type(instance).__name__, name)
 
-            # send two packets, one log entry and one process flow entry
-            self.send_log_entry(level, name, LogEntryType.EnterMethod,
-                                ViewerId.Title);
-            self.send_process_flow(level, name, ProcessFlow.EnterMethod)
+        # send two packets, one log entry and one process flow entry
+        self.send_log_entry(level, name, LogEntryType.EnterMethod,
+                            ViewerId.Title);
+        self.send_process_flow(level, name, ProcessFlowType.EnterMethod)
 
     @default_level_to_parent
+    @if_is_on
     def leave_method(self, name, level=None, instance=None):
-        if self.is_on(level):
-            if instance:
-                name = "%s.%s" %(type(instance).__name__, name)
+        if instance:
+            name = "%s.%s" %(type(instance).__name__, name)
 
-            # send two packets, one log entry and one process flow entry
-            self.send_log_entry(level, name, LogEntryType.EnterMethod,
-                                ViewerId.Title);
-            self.send_process_flow(level, name, ProcessFlow.LeaveMethod)
+        # send two packets, one log entry and one process flow entry
+        self.send_log_entry(level, name, LogEntryType.LeaveMethod,
+                            ViewerId.Title);
+        self.send_process_flow(level, name, ProcessFlowType.LeaveMethod)
 
 
     @default_level_to_parent
+    @if_is_on
     def enter_thread(self, name, level=None):
-          if self.is_on(level):
-              self.send_process_flow(level, name, ProcessFlow.EnterThread)
+        self.send_process_flow(level, name, ProcessFlowType.EnterThread)
 
     @default_level_to_parent
+    @if_is_on
     def leave_thread(self, name, level=None):
-          if self.is_on(level):
-              self.send_process_flow(level, name, ProcessFlow.LeaveThread)
+        self.send_process_flow(level, name, ProcessFlowType.LeaveThread)
 
     @default_level_to_parent
+    @if_is_on
     def enter_process(self, name=None, level=None):
-          if self.is_on(level):
-              self.send_process_flow(level, name or self.parent.appname,
-                                     ProcessFlow.EnterProcess)
-              self.send_process_flow(level, 'Main Thread', ProcessFlow.EnterThread)
+        self.send_process_flow(level, name or self.parent.appname,
+                             ProcessFlowType.EnterProcess)
+        self.send_process_flow(level, 'Main Thread', ProcessFlowType.EnterThread)
 
     @default_level_to_parent
+    @if_is_on
     def leave_process(self, name=None, level=None):
-          if self.is_on(level):
-              self.send_process_flow(level, name or self.parent.appname,
-                                     ProcessFlow.LeaveProcess)
-              self.send_process_flow(level, 'Main Thread', ProcessFlow.LeaveThread)
+        self.send_process_flow(level, 'Main Thread', ProcessFlowType.LeaveThread)
+        self.send_process_flow(level, name or self.parent.appname,
+                             ProcessFlowType.LeaveProcess)
 
+    def track(self, func):
+        """Decorator to add process flow tracking around the wrapped function.
 
-
+        Python lib specific (replaces ``TrackMethod``` utilities in Delphi).
+        """
+        def wrapped(*args, **kwargs):
+            self.enter_method(func.__name__)
+            try:
+                func(*args, **kwargs)
+            finally:
+                self.leave_method(func.__name__)
+        return wrapped
 
     def log_custom_file(self):
         raise NotImplementedError()  # TODO
@@ -1091,65 +1164,85 @@ class Session(object):
 
     def log_last_error(self, name):
         if self.is_on(LogLevel.Error):
-            self.log_exception(sys.last_value)
-
-
-
-
-
-    @if_is_on
-    def clear_all(self):
-        self.send_control_command(ControlCommand.ClearAll)
-
-    @if_is_on
-    def clear_auto_views(self):
-        self.send_control_command(ControlCommand.ClearAutoViews)
-
-    @if_is_on
-    def clear_watches(self):
-        self.send_control_command(ControlCommand.ClearWatches)
-
-    @if_is_on
-    def clear_log(self):
-        self.send_control_command(ControlCommand.ClearLog)
-
-    @if_is_on
-    def clear_process_flow(self):
-        self.send_control_command(ControlCommand.ClearProcessFlow)
-
-
+            self.log_exception(os.sys.last_value)
 
 
     @default_level_to_parent
     @if_is_on
-    def watch_boolean(self, name, value, level=None):
-        self.send_watch(level, name, value and 'True' or 'False',
-                        WatchType.Boolean)
+    def watch(self, name, value, level, watch_type=None):
+        # Determine the value format and watch type to use, based on the type
+        # of the value. The latter can be overridden via the ``watch_type``
+        # argument, which can also affect formatting (e.g. WatchType.Address).
+        if watch_type == WatchType.Address:
+            tp = watch_type
+            title = "%s" % id(value)
+        # wtObject: currently unused by SmartInspect.pas
+        elif isinstance(value, bool):
+            tp = WatchType.Boolean
+            title = value and 'True' or 'False'
+        elif isinstance(value, int):
+            tp = WatchType.Integer
+            title = u"%s" % value
+        elif isinstance(value, float):
+            tp = WatchType.Float
+            title = u"%s" % value
+        elif isinstance(value, datetime.datetime):
+            tp = WatchType.Float
+            title = u"%s" % value  # TODO: use better format?
+        else:
+            tp = WatchType.String
+            title = u"%s" % value
+
+        self.send_watch(level, name, title, tp)
 
     @default_level_to_parent
-    @if_is_on
-    def watch_boolean(self, name, value, level=None):
-        self.send_watch(level, name, value, WatchType.Char)
-
-
-
-
-    @default_level_to_parent
-    def add_checkpoint(self, level=None):
+    def add_checkpoint(self, level):
         with self._checkpointlock:
-            self._checkpoint_counter += 1
-            counter = self._checkpoint_counter
+            self._checkpointcounter += 1
+            counter = self._checkpointcounter
 
         if self.is_on(level):
-            title = 'Checkpoint #%d' % counter
+            title = 'Checkpoint #%d' % self._checkpointcounter
             self.send_log_entry(level, title, LogEntryType.Checkpoint,
                                 ViewerId.Title)
 
     def reset_checkpoint(self):
         with self._checkpointlock:
-            self._checkpoint_counter = 0
+            self._checkpointcounter = 0
 
 
+    def send_custom_control_command():
+        raise NotImplementedError()  # TODO
+
+    def send_custom_log_entry():
+        raise NotImplementedError()  # TODO
+
+    def send_custom_process_flow():
+        raise NotImplementedError()  # TODO
+
+    def send_custom_watch():
+        raise NotImplementedError()  # TODO
+
+
+    @if_is_on
+    def clear_all(self):
+        self.send_control_command(ControlCommandType.ClearAll)
+
+    @if_is_on
+    def clear_auto_views(self):
+        self.send_control_command(ControlCommandType.ClearAutoViews)
+
+    @if_is_on
+    def clear_watches(self):
+        self.send_control_command(ControlCommandType.ClearWatches)
+
+    @if_is_on
+    def clear_log(self):
+        self.send_control_command(ControlCommandType.ClearLog)
+
+    @if_is_on
+    def clear_process_flow(self):
+        self.send_control_command(ControlCommandType.ClearProcessFlow)
 
 
     @default_level_to_parent
@@ -1175,20 +1268,6 @@ class Session(object):
             del counters[name]
 
 
-
-    def send_custom_control_command():
-        raise NotImplementedError()  # TODO
-
-    def send_custom_log_entry():
-        raise NotImplementedError()  # TODO
-
-    def send_custom_process_flow():
-        raise NotImplementedError()  # TODO
-
-    def send_custom_watch():
-        raise NotImplementedError()  # TODO
-
-
 class SmartInspect(object):
     """Main entry point; Manages a list of ``Session``s"""
 
@@ -1197,6 +1276,9 @@ class SmartInspect(object):
     def __init__(self, appname):
         self.level = Level.Debug
         self.default_level = Level.Message
+        self.appname = appname
+        self.hostname = socket.gethostname()
+        self._enabled = False
 
         self._eventlock = threading.RLock()
         self._mainlock = threading.RLock()
@@ -1205,25 +1287,13 @@ class SmartInspect(object):
         self._sessions = {}
         self._connections = []
 
-        self.appname = appname
-        # TODO
-        self.hostname = ""
-        self.enabled = False
-
     def connect(self):
         for connection in self._connections:
-            try:
-                connection.connect()
-            except Exception, e:
-                self._error(e)
+            connection.connect()
 
     def disconnect(self):
         for connection in self._connections:
-            try:
-                connection.disconnect()
-            except Exception, e:
-                self._error(e)
-
+            connection.disconnect()
 
     def add_session(self, name, store=False):
         result = Session(self, name)
@@ -1283,36 +1353,33 @@ class SmartInspect(object):
     def apply_configuration(self):
         raise NotImplementedError()    # TODO
 
-
     def dispatch(self, caption, action, state):
         with self._mainlock:
             # find the protocol by the caption queried
             protocol = None
             for connection in self._connections:
-                if connection.caption == caption:
+                if connection.options.caption == caption:
                     protocol = connection
                     break
             if not protocol:
-                raise SmartInspectError(SiCaptionNotFoundError)
+                raise SmartInspectError(CAPTION_NOT_FOUND_MSG)
 
         command = ProtocolCommand(action, state)
         protocol.dispatch(command)
 
     def filter(self, packet):
+        """Return False to allow the packet to pass."""
         # TODO: allow callback to user
-        return True
+        return False
 
     def now(self):
-        # TODO
-        return 0
+        # return datetime.datetime.utcfromtimestamp(time.time())
+        return datetime.datetime.now()
 
     def process_packet(self, packet):
         with self._mainlock:
             for connection in self._connections:
-                try:
-                    connection.write_packet(packet)
-                except Exception, e:
-                    self._error(e)
+                connection.write_packet(packet)
 
     def send_control_command(self, control_command):
         if not self.filter(control_command):
@@ -1333,25 +1400,16 @@ class SmartInspect(object):
         if not self.filter(watch):
             self.process_packet(watch)
 
+    def _set_enabled(self, value):
+        value and [self.enable()] or [self.disable()]
+    enabled = property(lambda s: s._enabled, _set_enabled)
 
     def disable(self):
         if self._enabled:
-            self.enabled = False
+            self._enabled = False
             self.disconnect()
 
     def enable(self):
         if not self._enabled:
             self._enabled = True
             self.connect()
-
-
-
-################################################################################
-## Module startup.
-################################################################################
-
-Protocols.register('mem', MemoryProtocol)
-Protocols.register('tcp', TcpProtocol)
-# Not yet supported
-#Protocols.register('file', FileProtocol)
-#Protocols.register('text', TextProtocol)
