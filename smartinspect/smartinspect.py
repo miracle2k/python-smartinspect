@@ -22,6 +22,10 @@ Other Compatibility Notes:
     * The events of the ``SmartInspect`` class (OnWatch, OnLogEntry, ...) do
       not exist. If needed, implementing such callbacks could be considered.
 
+    * OnError has also been removed and deserves a special mention - instead,
+      exceptions raised in methods like ``load_connections`` are passed through
+      to the caller directly.
+
     * While the ``ViewerContext`` class exists to allow custom contexts, most
       of it's default subclasses are not implemented, as it is unclear what
       they are good for - their respective log functions seem to do their own
@@ -42,12 +46,20 @@ Other Compatibility Notes:
 
 from __future__ import with_statement
 import os, sys
+import re
 import socket
 import struct
 import threading, thread
 import datetime, time
 import StringIO
 
+from pyutils.xtypes import ValueEnum as Enum
+
+
+__all__ = (
+    'SmartInspect', 'Session',
+    'Level',
+)
 
 ################################################################################
 ## Global constants.
@@ -89,8 +101,8 @@ class LoadConfigurationsError(SmartInspectError):
 class ProtocolError(SmartInspectError):
     """Error raised in Protocol-related code.
 
-    References the ``Protocol`` instance directly, instead of storing it's name
-    and options string, as in the Delphi implementation.
+    References the ``Protocol`` instance directly, instead of storing
+    it's name and options string, as in the Delphi implementation.
     """
     def __init__(self, message, protocol, *args, **kwargs):
         self.protocol = protocol
@@ -104,14 +116,14 @@ class InvalidConnectionsError(SmartInspectError): pass
 ## Enumerations.
 ################################################################################
 
-class PacketType:
+class PacketType(Enum):
     """IDs as expected by SI console."""
     LogEntry = 4
     ControlCommand = 1
     Watch = 5
     ProcessFlow = 6
 
-class LogEntryType:
+class LogEntryType(Enum):
     """IDs as expected by SI console."""
     Separator = 0
     EnterMethod = 1
@@ -139,35 +151,8 @@ class LogEntryType:
     MemoryStatistic = 207
     DatabaseResult = 208
     DatabaseStructure = 209
-    idents = {
-        Separator: 'Separator',
-        EnterMethod: 'EnterMethod',
-        LeaveMethod: 'LeaveMethod',
-        ResetCallstack: 'ResetCallstack',
-        Message: 'Message',
-        Warning: 'Warning',
-        Error: 'Error',
-        InternalError: 'InternalError',
-        Comment: 'Comment',
-        VariableValue: 'VariableValue',
-        Checkpoint: 'Checkpoint',
-        Debug: 'Debug',
-        Verbose: 'Verbose',
-        Fatal: 'Fatal',
-        Conditional: 'Conditional',
-        Assert: 'Assert',
-        Text: 'Text',
-        Binary: 'Binary',
-        Graphic: 'Graphic',
-        Source: 'Source',
-        Object: 'Object',
-        WebContent: 'WebContent',
-        System: 'System',
-        MemoryStatistic: 'MemoryStatistic',
-        DatabaseResult: 'DatabaseResult',
-    }
 
-class ViewerId:
+class ViewerId(Enum):
     """IDs as expected by SI console."""
     None_ = -1
     Title = 0
@@ -190,31 +175,8 @@ class ViewerId:
     Jpeg = 401
     Icon = 402
     Metafile = 403
-    idents = {
-        None_: 'None',
-        Title: 'Title',
-        Data: 'Data',
-        List: 'List',
-        ValueList: 'ValueList',
-        Inspector: 'Inspector',
-        Table: 'Table',
-        Web: 'Web',
-        Binary: 'Binary',
-        HtmlSource: 'HtmlSource',
-        JavaScriptSource: 'JavaScriptSource',
-        VbScriptSource: 'VbScriptSource',
-        PerlSource: 'PerlSource',
-        SqlSource: 'SqlSource',
-        IniSource: 'IniSource',
-        PythonSource: 'PythonSource',
-        XmlSource: 'XmlSource',
-        Bitmap: 'Bitmap',
-        Jpeg: 'Jpeg',
-        Icon: 'Icon',
-        Metafile: 'Metafile',
-    }
 
-class SourceId:
+class SourceId(Enum):
     Html = 1
     Javascript = 2
     VbScript = 3
@@ -224,20 +186,20 @@ class SourceId:
     Python = 7
     Xml = 8
 
-class GraphicId:
+class GraphicId(Enum):
     Bitmap = 0
     Jpeg = 1
     Icon = 2
     Metafile = 3
 
-class ControlCommandType:
+class ControlCommandType(Enum):
     ClearLog = 0
     ClearWatches = 1
     ClearAutoViews = 2
     ClearAll = 3
     ClearProcessFlow = 4
 
-class WatchType:
+class WatchType(Enum):
     Char = 0
     String = 1
     Integer = 2
@@ -247,7 +209,7 @@ class WatchType:
     Timestamp = 6
     Object = 7
 
-class ProcessFlowType:
+class ProcessFlowType(Enum):
     EnterMethod = 0
     LeaveMethod = 1
     EnterThread = 2
@@ -255,7 +217,7 @@ class ProcessFlowType:
     EnterProcess = 4
     LeaveProcess = 5
 
-class Level:
+class Level(Enum):
     Debug = 0
     Verbose = 1
     Message = 2
@@ -263,15 +225,6 @@ class Level:
     Error = 4
     Fatal = 5
     Control = 6
-    idents = {
-        Debug: 'Debug',
-        Verbose: 'Verbose',
-        Message: 'Message',
-        Warning: 'Warning',
-        Error: 'Error',
-        Fatal: 'Fatal',
-        Control: 'Unknown',   # sic!
-    }
 
 class FileRotate:
     None_ = 0
@@ -279,31 +232,6 @@ class FileRotate:
     Daily = 2
     Weekly = 3
     Monthly = 4
-    idents = {
-        None_: 'None',
-        Hourly: 'Hourly',
-        Daily: 'Daily',
-        Weekly: 'Weekly',
-        Monthly: 'Monthly',
-    }
-
-
-################################################################################
-## Configuration/Option handling.
-################################################################################
-
-# TODO
-#class ConnectionsBuilder(object): pass
-
-# TODO
-#class ConnectionsParser(object): pass
-
-# TODO
-#class OptionsParser(object): pass
-
-# TODO
-#class Configuration(object): pass
-
 
 
 ################################################################################
@@ -314,33 +242,62 @@ class Packet(object):
     """Base class for all packets."""
     def __init__(self):
         self.level = Level.Message
+        self._data = StringIO.StringIO()
 
-    def get_size(self):
+    def _get_size(self):
         raise NotImplementedError()
+    size = property(lambda s: s._get_size())
 
-    def get_packet_type(self):
+    def _get_packet_type(self):
         raise NotImplementedError()
-    packet_type = property(lambda s: s.get_packet_type())
+    packet_type = property(lambda s: s._get_packet_type())
+
+    def _get_data(self):
+        return self._data
+    def _set_data(self, value):
+        if value:
+            self._data = copy(value)
+        else:
+            self._data.truncate(size=0)
+    data = property(_get_data, _set_data)
+
+    @property
+    def has_data(self):
+        return self._data and self._data.len > 0
 
 class PacketQueue(object):
-    def __init__(self, size=None):
+    """A queue of packet objects with auto byte-resizing functionality."""
+
+    def __init__(self, backlog=None):
         self._data = []
-        self._size = size
-    def _set_size(self, value):
-        self._size = value
+        self._backlog = backlog   # maximum size
+        self._size = 0
+
+    def _set_backlog(self, value):
+        self._backlog = value
         self._resize()
-    size = property(lambda s: s._size, _set_size)
+    backlog = property(lambda s: s._backlog, _set_backlog)
+
     def _resize(self):
-        while self.size and len(self._data) > self.size:
+        while self._backlog and self._size > self._backlog:
             self.pop()
+
     def clear(self):
-        while self._data: self.pop()
+        while self._data:
+            self.pop()
+
     def push(self, packet):
         self._data.append(packet)
+        self._size += packet.size
         self._resize()
+
     def pop(self):
-        if len(self._data): return self._data.pop(0)
-        else: return None
+        if len(self._data):
+            p = self._data.pop(0)
+            self._size -= p.size
+            return p
+        else:
+            return None
 
 class LogEntry(Packet):
     def __init__(self, log_entry_type, viewer_id):
@@ -352,74 +309,47 @@ class LogEntry(Packet):
         self.thread_id = thread.get_ident()
         self.process_id = os.getpid()
 
-    def get_size(self):
-##            Result :=
-##        SizeOf(TSiLogEntryHeader) +
-##        Length(FSessionName) +
-##        Length(FTitle) +
-##        Length(FAppName) +
-##        Length(FHostName);
-##
-##      if Assigned(FData) then
-##      begin
-##        Inc(Result, FData.Size);
-##      end;
-        pass
-
-    def get_packet_type(self):
-        return PacketType.LogEntry
-
-    # TODO: duplicated in ControlCommand - move to common base?
-    def _get_data(self):
-        return self._data
-    def _set_data(self, value):
-        if value:
-            self._data = copy(value)
-        else:
-            self._data.truncate(size=0)
-    data = property(_get_data, _set_data)
-
     @property
-    def has_data(self):
-        return self._data and self._data.len > 0
+    def size(self):
+        result = (48 +    # header
+                    len(self.sessionname) +
+                    len(self.title) +
+                    len(self.appname) +
+                    len(self.hostname))
+        if self.has_data:
+            result += self.data.len
+        return result
+
+    def _get_packet_type(self):
+        return PacketType.LogEntry
 
 class ControlCommand(Packet):
     def __init__(self, control_command_type):
         super(ControlCommand, self).__init__()
-        self._data = StringIO.StringIO()
         self.control_command_type = control_command_type
         self.level = Level.Control
 
-    def get_size():
-##        Result := SizeOf(TSiControlCommandHeader)
-##        if Assigned(FData) then
-##        begin
-##        Inc(Result, FData.Size);
-##        end;
-        pass
+    def _get_size():
+        result = 8        # header
+        if self.has_data:
+            result += self.data.len
+        return result
 
-    def get_packet_type(self):
+    def _get_packet_type(self):
         return PacketType.ControlCommand
-
-    def _get_data(self):
-        return self._data
-    def _set_data(self, value):
-        if value:
-            self._data = copy(value)
-        else:
-            self._data.truncate(size=0)
-    data = property(_get_data, _set_data)
-
-    @property
-    def has_data(self):
-        return self._data and self._data.len > 0
 
 class Watch(Packet):
     def __init__(self, watch_type):
         super(Watch, self).__init__()
         self.watch_type = watch_type
 
-    def get_packet_type(self):
+    def _get_size():
+        result = (20 +       # header
+                    len(self.name) +
+                    len(self.value))
+        return result
+
+    def _get_packet_type(self):
         return PacketType.Watch
 
 class ProcessFlow(Packet):
@@ -429,14 +359,13 @@ class ProcessFlow(Packet):
         self.thread_id = thread.get_ident()
         self.process_id = os.getpid()
 
-    def get_size():
-##        Result :=
-##        SizeOf(TSiProcessFlowHeader) +
-##        Length(FTitle) +
-##        Length(FHostName);
-        pass
+    def _get_size():
+        result = (28 +       # header
+                    len(self.title) +
+                    len(self.hostname))
+        return result
 
-    def get_packet_type(self):
+    def _get_packet_type(self):
         return PacketType.ProcessFlow
 
 
@@ -695,6 +624,10 @@ class ProtocolOptions(object):
                     self._validate_option(key)
                     return self._options.get(key, self._protocol.valid_options[key])
 
+        def __iter__(self):
+            for option in self._protocol.valid_options.keys():
+                yield option
+
         def reset(self):
             """Reset to default values."""
             # clearing the dict works, we are just storing the changed values
@@ -820,7 +753,7 @@ class Protocol(object):
 class MemoryProtocol(Protocol):
     name = "mem"
 
-    valid_options = Protocol.valid_options
+    valid_options = dict(Protocol.valid_options)
     valid_options.update({
         'astext': False,
         'maxsize': 2048,
@@ -868,7 +801,7 @@ class MemoryProtocol(Protocol):
 class TcpProtocol(Protocol):
     name = "tcp"
 
-    valid_options = Protocol.valid_options
+    valid_options = dict(Protocol.valid_options)
     valid_options.update({'host': '127.0.0.1',
                           'port': 4228,
                           'timeout': 30000})
@@ -922,12 +855,13 @@ class Protocols(object):
     _lock = threading.RLock()
 
     @classmethod
-    def get(cls, name, options):
+    def get(cls, name, options=None):
         with cls._lock:
             result = cls._table.get(name, False)()
             if not result:
                 raise SmartInspectError(u'Protocol "%s" not found'%name)
-        result.options = options
+        if options:
+            result.options = options
         return result
 
     @classmethod
@@ -967,7 +901,7 @@ def default_level_to_parent(func):
     """
     def wrapper(self, *args, **kwargs):
         if kwargs.get('level', None) is None:
-            kwargs['level'] = self.parent.level
+            kwargs['level'] = self.parent.defaultlevel
         return func(self, *args, **kwargs)
     return wrapper
 
@@ -1268,6 +1202,112 @@ class Session(object):
             del counters[name]
 
 
+def parse_connections(connection_str):
+    """Helper utility generator; parses a connection string with
+    protocol/options and yields ``Protocol`` instances.
+
+    Combines the ConnectionsParser and OptionsParser classes from
+    the Delphi implementation.
+
+    Here's a regex that would match a full connection string; for parsing,
+    we need to break it up to parse out the option list separately.
+        ([a-z]+)   \(          # protocol name
+            (                  # multiple options
+                ([a-z]+) =     # option name =
+                   # option value (escape with ")
+                   ((?:"[^"]*(?:"")?[^"]*")|\w+)
+                   # option seperator or end
+                   (?:\s*(,\s*|(?=\))))
+            )*
+        \)
+        \s*(,|$)               # protocol separator
+    """
+    re_connections = re.compile(r'([a-z]+)\((.*?)\)(?:,|$)')
+    re_options = re.compile(r'([a-z]+)=((?:"[^"]*(?:"")?[^"]*")|\w+)\s*(?:,\s*|$)')
+    def rsvopt(opt):
+        """Resolve string to option."""
+
+
+    connections = []
+    while connection_str:
+        m_connection = re_connections.search(connection_str)
+        if not m_connection:
+            raise InvalidConnectionsError('Invalid connection string: "%s"'%option_str)
+        protocol_name, option_str = m_connection.groups()
+        connection_str = connection_str[m_connection.end():]
+        connection = Protocols.get(protocol_name)
+
+        options = {}
+        while option_str:
+            m_option = re_options.search(option_str)
+            if not m_option:
+                raise InvalidConnectionsError('Invalid option string: "%s"'%option_str)
+            option_name, option_raw_value = m_option.groups()
+            option_str = option_str[m_option.end():]
+
+            # the challenging part is to convert to the right type; first,
+            # show a far we can get by infering the type from the option's
+            # default value; this is very useful for the enumerations, as
+            # we wouldn't.
+            option_value = None
+            _def_val = connection.valid_options.get(option_name, None)
+            if _def_val:
+                if isinstance(_def_val, type(Level.Debug)): # EnumInstance
+                    for check in [Level, FileRotate]:
+                        if _def_val.belongs(check):
+                            option_value = check.by_name(option_raw_value)
+                            if option_value is None:
+                                raise ConfigurationsError()
+                            break
+            if not option_value:
+                # oh well, try to guess the type from the string format/content
+                if option_raw_value.isdigit():
+                    option_value = int(option_raw_value)
+                elif option_raw_value in ['yes', 'true']:
+                    option_value = True
+                elif option_raw_value in ['0', 'no', 'false']:
+                    option_value = False
+                else:
+                    option_value = str(option_raw_value)
+
+            options[option_name] = option_value
+
+        # finally, add the found connection to the list
+        connection.options = options
+        connections.append(connection)
+
+    # Return what we have found; note that we have first parsed the whole
+    # string - possible errors have already been caught. E.g. this function
+    # will either succeed and return all connections, or fail fully (no
+    # partial results). This effects the callers exception handling.
+    for c in connections:
+        yield c
+
+def make_connection_string(connection_list):
+    """Serialize a list of ``Protocol`` instances into a string (their options,
+    to be exact. This is the opposite of ``parse_connections``.
+
+    In Delphi, this is implemented via the ConnectionsBuilder class.
+    """
+    def fmtopt(option):
+        if option is None:
+            return "none"
+        elif isinstance(option, bool):
+            return option and 'true' or 'false'
+        elif isinstance(option, type(Level.Debug)):  # EnumInstance
+            return option.name(short=True).lower()
+        elif isinstance(option, int):
+            return '%s' % option
+        else:  # elif isinstance(option, basestring)
+            return '"%s"' % option
+    return ",".join(["%s(%s)" % (connection.name,
+        ",".join([
+             "%s=%s" % (option, fmtopt(getattr(connection.options, option)))
+             for option in connection.options
+        ]))
+        for connection in connection_list
+    ])
+
 class SmartInspect(object):
     """Main entry point; Manages a list of ``Session``s"""
 
@@ -1275,7 +1315,7 @@ class SmartInspect(object):
 
     def __init__(self, appname):
         self.level = Level.Debug
-        self.default_level = Level.Message
+        self.defaultlevel = Level.Message
         self.appname = appname
         self.hostname = socket.gethostname()
         self._enabled = False
@@ -1287,6 +1327,62 @@ class SmartInspect(object):
         self._sessions = {}
         self._connections = []
 
+    def _set_connections(self, value):
+        with self._mainlock:
+            # disconnect first, and reset connection list
+            self.disconnect()
+            self._connections = []
+
+            for connection in parse_connections(value):
+                self._connections.append(connection)
+
+            # if we're currently enabled,
+            # then connect right away.
+            if self.enabled:
+                self.connect()
+    def _get_connections(self):
+        return make_connection_string(self._connections)
+    connections = property( _get_connections, _set_connections)
+
+    def load_connections(self):   # TODO
+        """Read the connections string form a file."""
+        raise NotImplementedError()
+
+    def load_configuration(self, filename):
+        """Load configuration from a file."""
+
+        config = {}
+        f = open(filename)
+        with f:
+            for line in f:
+                line = line.strip()
+                if line and not line[1] == ';':
+                    key, value = line.split("=")
+                    config[key.strip()] = value.strip()
+
+        self.appname = config.get('appname', self.appname)
+        self.level = Level.by_name(config.get('level', None), self.level)
+        self.defaultlevel = Level.by_name(config.get('defaultlevel', None),
+                                          self.defaultlevel)
+
+        # applying connections is tougher; make sure that depending on the
+        # value of "enabled" we set the new connections at the right point
+        # in time, so that enabling will work with the new connections, but
+        # disabling still uses the old ones.
+        connections = configuration.get('connections', '')
+        if 'enabled' in configuration:
+            enabled = configuration['enabled']
+
+            if enabled:
+                self.connections = connections
+                self.enable()
+            else:
+                self.connections = connections
+                tryconnections(connections)
+        else:
+            self.connections = connections
+
+
     def connect(self):
         for connection in self._connections:
             connection.connect()
@@ -1294,6 +1390,7 @@ class SmartInspect(object):
     def disconnect(self):
         for connection in self._connections:
             connection.disconnect()
+
 
     def add_session(self, name, store=False):
         result = Session(self, name)
@@ -1327,31 +1424,6 @@ class SmartInspect(object):
                     if value == session:
                         del self._sessions[key]
                         break
-
-
-    def clear_connections(self):
-        self.connections = []
-
-    def load_connections(self):
-        raise NotImplementedError()    # TODO
-
-    def read_connections(self):
-        raise NotImplementedError()    # TODO
-
-    def apply_connections(self):
-        raise NotImplementedError()    # TODO
-
-    def try_connections(self):
-        raise NotImplementedError()    # TODO
-
-    def remove_connections(self):
-        raise NotImplementedError()    # TODO
-
-    def load_configuration(self):
-        raise NotImplementedError()    # TODO
-
-    def apply_configuration(self):
-        raise NotImplementedError()    # TODO
 
     def dispatch(self, caption, action, state):
         with self._mainlock:
