@@ -1350,37 +1350,37 @@ class SmartInspect(object):
 
     def load_configuration(self, filename):
         """Load configuration from a file."""
+        with self._mainlock:
+            config = {}
+            f = open(filename)
+            with f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line[1] == ';':
+                        key, value = line.split("=")
+                        config[key.strip()] = value.strip()
 
-        config = {}
-        f = open(filename)
-        with f:
-            for line in f:
-                line = line.strip()
-                if line and not line[1] == ';':
-                    key, value = line.split("=")
-                    config[key.strip()] = value.strip()
+            self.appname = config.get('appname', self.appname)
+            self.level = Level.by_name(config.get('level', None), self.level)
+            self.defaultlevel = Level.by_name(config.get('defaultlevel', None),
+                                              self.defaultlevel)
 
-        self.appname = config.get('appname', self.appname)
-        self.level = Level.by_name(config.get('level', None), self.level)
-        self.defaultlevel = Level.by_name(config.get('defaultlevel', None),
-                                          self.defaultlevel)
+            # applying connections is tougher; make sure that depending on the
+            # value of "enabled" we set the new connections at the right point
+            # in time, so that enabling will work with the new connections, but
+            # disabling still uses the old ones.
+            connections = configuration.get('connections', '')
+            if 'enabled' in configuration:
+                enabled = configuration['enabled']
 
-        # applying connections is tougher; make sure that depending on the
-        # value of "enabled" we set the new connections at the right point
-        # in time, so that enabling will work with the new connections, but
-        # disabling still uses the old ones.
-        connections = configuration.get('connections', '')
-        if 'enabled' in configuration:
-            enabled = configuration['enabled']
-
-            if enabled:
-                self.connections = connections
-                self.enable()
+                if enabled:
+                    self.connections = connections
+                    self.enable()
+                else:
+                    self.connections = connections
+                    tryconnections(connections)
             else:
                 self.connections = connections
-                tryconnections(connections)
-        else:
-            self.connections = connections
 
 
     def connect(self):
