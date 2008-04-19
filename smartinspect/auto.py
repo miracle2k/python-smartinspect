@@ -13,9 +13,9 @@ change it before enabling:
 """
 
 import os
-from smartinspect import SmartInspect
+from smartinspect import SmartInspect, Level
 
-__all__ = ('si', 'si_main',)
+__all__ = ('si', 'si_main', 'Level')
 
 si = SmartInspect(os.path.basename(os.sys.argv[0]))
 si.connections = 'tcp()'

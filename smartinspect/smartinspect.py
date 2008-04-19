@@ -309,10 +309,9 @@ class LogEntry(Packet):
         self.thread_id = thread.get_ident()
         self.process_id = os.getpid()
 
-    @property
-    def size(self):
+    def _get_size(self):
         result = (48 +    # header
-                    len(self.sessionname) +
+                    len(self.session_name) +
                     len(self.title) +
                     len(self.appname) +
                     len(self.hostname))
@@ -329,7 +328,7 @@ class ControlCommand(Packet):
         self.control_command_type = control_command_type
         self.level = Level.Control
 
-    def _get_size():
+    def _get_size(self):
         result = 8        # header
         if self.has_data:
             result += self.data.len
@@ -343,7 +342,7 @@ class Watch(Packet):
         super(Watch, self).__init__()
         self.watch_type = watch_type
 
-    def _get_size():
+    def _get_size(self):
         result = (20 +       # header
                     len(self.name) +
                     len(self.value))
@@ -359,7 +358,7 @@ class ProcessFlow(Packet):
         self.thread_id = thread.get_ident()
         self.process_id = os.getpid()
 
-    def _get_size():
+    def _get_size(self):
         result = (28 +       # header
                     len(self.title) +
                     len(self.hostname))
@@ -990,7 +989,7 @@ class Session(object):
     @if_is_on
     def log(self, title, level=None, color=None,
             entry_type=LogEntryType.Message):
-        self.send_log_entry(level, title, entry_type, ViewerId.Title,
+        self.send_log_entry(level, "%s"%title, entry_type, ViewerId.Title,
                             color=color)
 
     def log_debug(self, *args, **kwargs):
@@ -1076,7 +1075,7 @@ class Session(object):
         def wrapped(*args, **kwargs):
             self.enter_method(func.__name__)
             try:
-                func(*args, **kwargs)
+                return func(*args, **kwargs)
             finally:
                 self.leave_method(func.__name__)
         return wrapped
