@@ -226,7 +226,7 @@ class Level(Enum):
     Fatal = 5
     Control = 6
 
-class FileRotate:
+class FileRotate(Enum):
     None_ = 0
     Hourly = 1
     Daily = 2
@@ -553,7 +553,9 @@ class ProtocolCommand(object):
         self.state = state
 
 class ProtocolOptions(object):
-    """Manages a set of options for a protocol instance.
+    """Manages a set of options for a protocol instance. The instance is
+    expected to store it's copy of the options in an attribute named
+    ``_options``.
 
     This replaces the BuildOptions/LoadOptions methods on ``Protocol``
     classes in the Delphi implementation.
@@ -564,13 +566,12 @@ class ProtocolOptions(object):
         self.onchange = onchange
 
     def __get__(self, instance, owner):
-        # Options property is read, return an options instance linking the
-        # the protocol this was accessed by (``instance``). Note that the
-        # options dict is passed by reference (which is what we want)!
-        return ProtocolOptions._OptionsImpl(self._options, instance, self.onchange)
+        # options property is read, return an options instance linking to
+        # the protocol object this was accessed by (``instance``).
+        return ProtocolOptions._OptionsImpl(instance, self.onchange)
 
     def __set__(self, instance, value):
-        # Something is assigned to the options property.
+        # something is assigned to the options property
         if isinstance(value, dict):
             pass
         elif value is None:
@@ -583,17 +584,18 @@ class ProtocolOptions(object):
 
         # update our own values
         for k, v in value.items():
-            setattr(self, k, v)
+            setattr(instance.options, k, v)
 
     class _OptionsImpl(object):
         # The actual options "attribute access" implementation. The outer
         # descriptor creates an instance of this with a link to the correct
-        # ``Protocol`` on "get".
+        # ``Protocol`` instance on "get".
 
-        def __init__(self, options, protocol, onchange):
-            self._options = options
+        def __init__(self, protocol, onchange):
             self._onchange = onchange
             self.__dict__['_protocol'] = protocol # __setattr__ already requires this
+            if not hasattr(protocol, '_options'):
+                protocol._options = {}
 
         def _validate_option(self, option):
             if not option in self._protocol.valid_options.keys():
@@ -609,19 +611,17 @@ class ProtocolOptions(object):
                         raise SmartInspectError(PROTOCOL_CONNECTED_MSG)
 
                     self._validate_option(key)
-                    if value != self._options.get(key, None):
-                        self._options[key] = value
+                    if value != self._protocol._options.get(key, None):
+                        self._protocol._options[key] = value
                         # note this is only called on an actual change
                         if self._onchange:
                             self._onchange(self._protocol)
 
         def __getattr__(self, key):
-            if key.startswith('_'):
-                return object.__getattr__(self, key)
-            else:
-                with self._protocol._lock:
-                    self._validate_option(key)
-                    return self._options.get(key, self._protocol.valid_options[key])
+            with self._protocol._lock:
+                self._validate_option(key)
+                return self._protocol._options.get(
+                    key, self._protocol.valid_options[key])
 
         def __iter__(self):
             for option in self._protocol.valid_options.keys():
@@ -630,7 +630,7 @@ class ProtocolOptions(object):
         def reset(self):
             """Reset to default values."""
             # clearing the dict works, we are just storing the changed values
-            self._options = {}
+            self._protocol.options = {}
             if self._onchange:
                 self._onchange(self._protocol)
 
@@ -651,7 +651,7 @@ class Protocol(object):
             self.options.caption = type(self).name
         if self.options.backlog <= 0:
             self.options.keepopen = True
-    options = ProtocolOptions(_options_changed)
+    options = ProtocolOptions(lambda s: s._options_changed())
 
     def __init__(self):
         self._lock = threading.RLock()
@@ -760,7 +760,7 @@ class MemoryProtocol(Protocol):
         'indent': False})
 
     def _options_changed(self):
-        super(MemoryProtocol, self).validate_options()
+        super(MemoryProtocol, self)._options_changed()
         # use a formatter fitting for the selection setting
         if self.options.astext:
             self.formatter = TextFormatter()
@@ -1231,7 +1231,7 @@ def parse_connections(connection_str):
     while connection_str:
         m_connection = re_connections.search(connection_str)
         if not m_connection:
-            raise InvalidConnectionsError('Invalid connection string: "%s"'%option_str)
+            raise InvalidConnectionsError('Invalid connection string: "%s"'%connection_str)
         protocol_name, option_str = m_connection.groups()
         connection_str = connection_str[m_connection.end():]
         connection = Protocols.get(protocol_name)
@@ -1244,30 +1244,26 @@ def parse_connections(connection_str):
             option_name, option_raw_value = m_option.groups()
             option_str = option_str[m_option.end():]
 
-            # the challenging part is to convert to the right type; first,
-            # show a far we can get by infering the type from the option's
-            # default value; this is very useful for the enumerations, as
-            # we wouldn't.
+            # try to convert the value string to the right type
             option_value = None
-            _def_val = connection.valid_options.get(option_name, None)
-            if _def_val:
-                if isinstance(_def_val, type(Level.Debug)): # EnumInstance
-                    for check in [Level, FileRotate]:
-                        if _def_val.belongs(check):
-                            option_value = check.by_name(option_raw_value)
-                            if option_value is None:
-                                raise ConfigurationsError()
-                            break
-            if not option_value:
-                # oh well, try to guess the type from the string format/content
-                if option_raw_value.isdigit():
-                    option_value = int(option_raw_value)
-                elif option_raw_value in ['yes', 'true']:
-                    option_value = True
-                elif option_raw_value in ['0', 'no', 'false']:
-                    option_value = False
-                else:
-                    option_value = str(option_raw_value)
+            if option_raw_value.isdigit():
+                option_value = int(option_raw_value)
+            elif option_raw_value in ['yes', 'true']:
+                option_value = True
+            elif option_raw_value in ['0', 'no', 'false']:
+                option_value = False
+            elif option_raw_value.startswith('"') and\
+                 option_raw_value.endswith('"') and\
+                 len(option_raw_value)>1:
+                option_value = option_raw_value[1:-1]
+            else:
+                # otherwise, this must be an enum identifer - but which one?
+                for check in [Level, FileRotate]:
+                    option_value = check.by_name(option_raw_value)
+                    if option_value is None:
+                        break
+                if not option_value is None:
+                    raise InvalidConnectionsError(option_raw_value)
 
             options[option_name] = option_value
 
