@@ -5,15 +5,11 @@ http://shootout.alioth.debian.org/gp4/benchmark.php?test=mandelbrot&lang=python&
 
 from smartinspect.auto import *
 
-si.connections = 'tcp()'
-si.enabled = True
-si.level = Level.Debug
-
 import sys
 
 @si_main.track
 def mandelbrot(size):
-    cout = sys.stdout.write
+    #cout = sys.stdout.write
     iter = 50
     limit = 2.
     fsize = float(size)
@@ -22,7 +18,7 @@ def mandelbrot(size):
     bit_num = 7
     byte_acc = 0
 
-    cout("P4\n%d %d\n" % (size, size))
+    #cout("P4\n%d %d\n" % (size, size))
 
     for y in xr_size:
         si_main.log_value("y-loop", y)
@@ -42,7 +38,7 @@ def mandelbrot(size):
 
             if bit_num == 0:
                 si_main.log_debug("cout %s" % byte_acc)
-                cout(chr(byte_acc))
+                #cout(chr(byte_acc))
                 bit_num = 7
                 byte_acc = 0
             else:
@@ -50,14 +46,28 @@ def mandelbrot(size):
 
         if bit_num != 7:
             si_main.log_debug("cout %s" % byte_acc)
-            cout(chr(byte_acc))
+            #cout(chr(byte_acc))
             bit_num = 7
             byte_acc = 0
 
 if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        print "Expected one argument."
+        sys.exit(1)
+    si.connections = sys.argv[1]
+    si.enabled = True
+    si.level = Level.Debug
+
+    #### logging start ####
+
     si_main.clear_all()
     si_main.enter_process()
     try:
         mandelbrot(5)
     finally:
         si_main.leave_process()
+
+    #### logging end ####
+
+    from __init__ import mem2stdout
+    mem2stdout(si)

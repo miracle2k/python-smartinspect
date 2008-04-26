@@ -10,10 +10,6 @@ http://shootout.alioth.debian.org/gp4/benchmark.php?test=recursive&lang=python&i
 
 from smartinspect.auto import *
 
-si.connections = 'tcp()'
-si.enabled = True
-si.level = Level.Debug
-
 import sys
 
 @si_main.track
@@ -44,13 +40,25 @@ def TakFP(x, y, z):
     if y < x: return TakFP( TakFP(x-1.0,y,z), TakFP(y-1.0,z,x), TakFP(z-1.0,x,y) )
     return z
 
-from sys import argv, setrecursionlimit
-setrecursionlimit(20000)
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        print "Expected one argument."
+        sys.exit(1)
+    si.connections = sys.argv[1]
+    si.enabled = True
+    si.level = Level.Debug
 
-n = 1
-print "Ack(3,%d):" % (n+1), Ack(3, n+1)
+    #### logging start ####
 
-n = 2
-print "Tak(%d,%d,%d): %d" % (3*n, 2*n, n, Tak(3*n, 2*n, n))
-print "Fib(3):", Fib(3)
-print "Tak(3.0,2.0,1.0):", TakFP(3.0, 2.0, 1.0)
+    from sys import argv, setrecursionlimit
+    setrecursionlimit(20000)
+
+    Ack(3, 2)
+    Tak(3*2, 2*2, 2)
+    Fib(3)
+    TakFP(3.0, 2.0, 1.0)
+
+    #### logging end ####
+
+    from __init__ import mem2stdout
+    mem2stdout(si)
