@@ -27,7 +27,7 @@ Manually logging process flow:
 >>>     try:
 >>>         pass   # so something
 >>>     finally:
->>>         logger.leave_method("append, self)
+>>>         logger.leave_method("append", self)
 
 
 Logging process flow using the decorator:
