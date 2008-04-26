@@ -417,8 +417,10 @@ class BinaryFormatter(Formatter):
         tdatetime = time.mktime(d.timetuple()) / 86400 + 25569.0
         self._stream.write(struct.pack('d', tdatetime))
     def _write_color(self, c):
-        # c is a 4-tuple; see module doc section on colors for more info
-        self._write_string("".join(map(lambda n: struct.pack('B', n), c)))
+        # c is a 3 or 4-tuple; see module doc section on colors for more info
+        e = (list(c) + [0])[:4]
+        if len(e) != 4: raise SmartInspectError('Not a valid color: %s'%c)
+        self._write_string("".join(map(lambda n: struct.pack('B', n), e)))
 
     def write(self, stream):
         """Writes a previously compiled packet to the supplied stream."""
@@ -934,8 +936,19 @@ class Session(object):
                 self.name = value
 
     def is_on(self, level=None):
+        """
+        Returns ``True`` if information would be logged for a certain log
+        level or ``False`` if not. If ``level`` is not passed the result
+        can still vary depending on whether the session is active, or the
+        parent ``SmartInspect`` instance enabled.
+
+        Python port note: The Delphi version uses two overloaded versions
+        of this method here, which we can replace by defaulting the
+        ``level`` argument to ``None``.
+        """
         return self.active and self.parent.enabled and (
-                    level >= self.parent.level or not level)
+                    level >= self.parent.level or level is None)
+
 
 
     def send_log_entry(self, level, title, log_entry_type, viewer_id,
@@ -974,23 +987,33 @@ class Session(object):
         # TODO: just send_log_entry with a viewer instance as the data part
         raise NotImplementedError()
 
-    def log_value(self, name, value, level=None, *args, **kwargs):
-        # Depending on the datatype we may choose a different output format
-        if isinstance(value, basestring):
-            title = "%s = '%s'" % (name, value)
-        else:
-            title = "%s = %s" % (name, value)
 
-        self.log(title, level=level,
-                 entry_type=LogEntryType.VariableValue,
-                 *args, **kwargs)
 
     @default_level_to_parent
     @if_is_on
     def log(self, title, level=None, color=None,
             entry_type=LogEntryType.Message):
-        self.send_log_entry(level, "%s"%title, entry_type, ViewerId.Title,
-                            color=color)
+        """
+        A generic log method that allows full customization of all
+        parameters involved.
+
+        Python port note: This method is new - the Delphi implementation's
+        log methods all call ``send_log_entry`` directly. In the Python
+        version, those other methods all capture surplus arguments and pass
+        them along to this generic version. I.e. the ``color`` argument (and
+        possibly others in the future) are supported by all the log methods
+        through this base implementation.
+
+        While you can directly call this method if you want, it is
+        recommended that you use the level- or type-specific methods like
+        ``log_debug`` or ``log_value`` instead whenever possible.. In
+        particular, those will also take care of sending the appropriate
+        entry type for each specific log level (while the level determines
+        what or when an entry is shown, the entry type determines *how* it is
+        displayed, e.g. icon).
+        """
+        self.send_log_entry(level, "%s"%title, entry_type,
+                            ViewerId.Title, color=color)
 
     def log_debug(self, *args, **kwargs):
         self.log(level=Level.Debug, entry_type=LogEntryType.Debug, *args, **kwargs)
@@ -1005,16 +1028,82 @@ class Session(object):
     def log_fatal(self, *args, **kwargs):
         self.log(level=Level.Fatal, entry_type=LogEntryType.Fatal, *args, **kwargs)
 
+
+
+    def log_value(self, name, value, level=None, *args, **kwargs):
+        # Depending on the datatype we may choose a different output format
+        if isinstance(value, basestring):
+            title = "%s = '%s'" % (name, value)
+        else:
+            title = "%s = %s" % (name, value)
+
+        self.log(title, level=level,
+                 entry_type=LogEntryType.VariableValue,
+                 *args, **kwargs)
+
+
+
     @default_level_to_parent
     @if_is_on
     def log_separator(self, level=None):
-        self.send_log_entry(level, '', LogLevelType.Separator)
+        self.send_log_entry(level, '', LogEntryType.Separator, ViewerId.None_)
 
     def log_assert(self, condition, title):
-        if self.is_on(LogLevel.Error):
+        if self.is_on(Level.Error):
             if not condition:
-                self.send_log_entry(LogLevel.Error, title, LogEntryType.Assert,
+                self.send_log_entry(Level.Error, title, LogEntryType.Assert,
                                     ViewerId.Title)
+
+    def log_custom_file(self):
+        raise NotImplementedError()  # TODO
+
+    def log_custom_stream(self):
+        raise NotImplementedError()  # TODO
+
+    def log_object(self):
+        raise NotImplementedError()  # TODO: RTTI/dir
+
+    def log_memory_statistic(self):
+        raise NotImplementedError()  # TODO
+
+    def log_system(self):
+        raise NotImplementedError()  # TODO
+
+    def log_internal_error(self, title):
+        self.log(title, level=Level.Error, entry_type=LogEntryType.InternalError)
+
+    def log_exception(self, title='', exception=None, *args, **kwargs):
+        """Log the exception given in ``exception`` argument, or the one
+        currently handled, if any.
+        """
+        if self.is_on(Level.Error):
+            if not exception:
+                exception = sys.exc_info()[1]
+                if exception is None:
+                    self.log_internal_error('log_exception: No exception is currently handled')
+                    return
+
+            # TODO: this is dangerous, as we don't know what str() returns;
+            # especially non-ascii error messages will create problems.
+            # find a better way to convert to a string, e.g. see:
+            # http://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/444746
+            msg = (title and title+': ' or '') + str(exception)
+            self.log_error(msg, *args, **kwargs)
+
+##    -- Hm, looks liek sys.last_value only works for unhandled exceptions.
+##   --  That's not that helpful.
+##    def log_last_exception(self, title=''):
+##        """Log the last exception occured.
+##
+##        Python port note: Not available in the Delphi version. Do not
+##        confuse with LogLastError(), which is Win32 API specific.
+##        """
+##        exception = getattr(sys, 'last_value', None)
+##        if not exception:
+##            self.log_internal_error('log_exception: No last exception found')
+##        else:
+##            return self.log_exception(title=title, exception=exception)
+
 
     @default_level_to_parent
     def reset_callstack(self, level=None):
@@ -1041,6 +1130,7 @@ class Session(object):
         self.send_log_entry(level, name, LogEntryType.LeaveMethod,
                             ViewerId.Title);
         self.send_process_flow(level, name, ProcessFlowType.LeaveMethod)
+
 
 
     @default_level_to_parent
@@ -1080,24 +1170,6 @@ class Session(object):
                 self.leave_method(func.__name__)
         return wrapped
 
-    def log_custom_file(self):
-        raise NotImplementedError()  # TODO
-
-    def log_custom_stream(self):
-        raise NotImplementedError()  # TODO
-
-    def log_object(self):
-        raise NotImplementedError()  # TODO: RTTI/dir
-
-    def log_memory_statistic(self):
-        raise NotImplementedError()  # TODO
-
-    def log_system(self):
-        raise NotImplementedError()  # TODO
-
-    def log_last_error(self, name):
-        if self.is_on(LogLevel.Error):
-            self.log_exception(os.sys.last_value)
 
 
     @default_level_to_parent
@@ -1144,6 +1216,31 @@ class Session(object):
             self._checkpointcounter = 0
 
 
+
+    @default_level_to_parent
+    @if_is_on
+    def inc_counter(self, name, level=None):
+        with self._counterlock:
+            self.counters[name] += 1
+            value = self.counters[name]
+        self.send_watch(level, name, value, WatchType.Integer)
+
+    @default_level_to_parent
+    @if_is_on
+    def dec_counter(self, name, level=None):
+        with self._counterlock:
+            self.counters[name] -= 1
+            value = self.counters[name]
+        self.send_watch(level, name, value, WatchType.Integer)
+
+    @default_level_to_parent
+    @if_is_on
+    def reset_counter(self, name):
+        with self._counterlock:
+            del counters[name]
+
+
+
     def send_custom_control_command():
         raise NotImplementedError()  # TODO
 
@@ -1177,28 +1274,6 @@ class Session(object):
     def clear_process_flow(self):
         self.send_control_command(ControlCommandType.ClearProcessFlow)
 
-
-    @default_level_to_parent
-    @if_is_on
-    def inc_counter(self, name, level=None):
-        with self._counterlock:
-            self.counters[name] += 1
-            value = self.counters[name]
-        self.send_watch(level, name, value, WatchType.Integer)
-
-    @default_level_to_parent
-    @if_is_on
-    def dec_counter(self, name, level=None):
-        with self._counterlock:
-            self.counters[name] -= 1
-            value = self.counters[name]
-        self.send_watch(level, name, value, WatchType.Integer)
-
-    @default_level_to_parent
-    @if_is_on
-    def reset_counter(self, name):
-        with self._counterlock:
-            del counters[name]
 
 
 def parse_connections(connection_str):
@@ -1279,8 +1354,8 @@ def parse_connections(connection_str):
         yield c
 
 def make_connection_string(connection_list):
-    """Serialize a list of ``Protocol`` instances into a string (their options,
-    to be exact. This is the opposite of ``parse_connections``.
+    """Serialize a list of ``Protocol`` instances into a string (their
+    options, to be exact. This is the opposite of ``parse_connections``.
 
     In Delphi, this is implemented via the ConnectionsBuilder class.
     """
@@ -1420,14 +1495,23 @@ class SmartInspect(object):
                         del self._sessions[key]
                         break
 
+    def find_protocol(self, caption):
+        """Find a protocol by it's ``caption`` option, or ``None`` if not
+        found.
+
+        Python port note: This method is protected in Delphi, but is very
+        useful as a public functionality, for example in our tests where we
+        need to check if a dispatch() call will work, or fail.
+        """
+        for connection in self._connections:
+            if connection.options.caption == caption:
+                return connection
+        return None
+
+
     def dispatch(self, caption, action, state):
         with self._mainlock:
-            # find the protocol by the caption queried
-            protocol = None
-            for connection in self._connections:
-                if connection.options.caption == caption:
-                    protocol = connection
-                    break
+            protocol = self.find_protocol(caption)
             if not protocol:
                 raise SmartInspectError(CAPTION_NOT_FOUND_MSG)
 
