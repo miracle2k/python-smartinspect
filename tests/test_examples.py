@@ -77,5 +77,8 @@ def test_examples(create_ref_data=False):
         else:
             print "RESULT: all tests OK"
 
+        # cause py.test to fail
+        assert tests_failed == 0
+
 if __name__ == '__main__':
     test_examples(create_ref_data=True)

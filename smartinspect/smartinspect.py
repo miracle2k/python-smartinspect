@@ -53,7 +53,10 @@ import threading, thread
 import datetime, time
 import StringIO
 
-from pyutils.xtypes import ValueEnum as Enum
+try:
+    from pyutils.xtypes import ValueEnum as Enum
+except:
+    from __enum import ValueEnum as Enum
 
 
 __all__ = (
