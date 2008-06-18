@@ -41,3 +41,4 @@ Todo:
 
 	* FileProtocol, TextProtocol
 	* Integration with Python Logging
+	* @track should log function arguments
