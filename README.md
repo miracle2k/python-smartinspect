@@ -5,7 +5,7 @@ Dependencies:
 -------------
   * Python 2.5
   * py.test for running the tests
-	
+
 Examples:
 ---------
 
@@ -26,6 +26,17 @@ __Manual initialization, without using the smartinspect.auto module:__
 >>> logger = si.add_session("main")
 >>> logger.log_debug("hello world!")
 ```
+
+__Logging via tcp to a running SmartInspect Console on localhost__
+```python
+>>> import smartinspect
+>>> si = smartinspect.SmartInspect("myapp")
+>>> si.connections = "tcp()"
+>>> si.enabled = True
+>>> logger = si.add_session("main")
+>>> logger.log_debug("hello world!")
+```
+
 
 __Manually logging process flow:__
 
